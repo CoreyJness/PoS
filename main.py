@@ -1,6 +1,6 @@
 if __name__ == "__main__":
     # Import the classes from your main POS file
-    from POS import EmployeeAuth, Inventory, Product
+    from POS import EmployeeAuth, Inventory, Product, DailySales
     from UI import POSUI
     import os
     
@@ -46,8 +46,11 @@ if __name__ == "__main__":
     inv = Inventory(auth)
     inv.load_from_csv()
     
+    # Initialize daily sales tracker
+    daily_sales = DailySales()
+    
     # Start UI
-    pos_ui = POSUI(auth, inv)
+    pos_ui = POSUI(auth, inv, daily_sales)
     
     # Add some sample products
     pos_ui.products["Chocolate Cake"] = Product("Chocolate Cake", {

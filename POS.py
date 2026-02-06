@@ -1,6 +1,8 @@
 import csv
 import hashlib
 import datetime
+import json
+import os
 
 class Inventory:
     def __init__(self, auth_system):
@@ -49,6 +51,10 @@ class Inventory:
                 })
         print(f"Saved inventory to {filename}")
     
+    def get_ingredient_names(self):
+        """Return list of ingredient names for dropdowns"""
+        return sorted(list(self.ingredients.keys()))
+    
     def add_ingredient(self, name, quantity, total_price, unit):
         """Add or update ingredient - workers just enter quantity and total price"""
         employee_name = self._require_login()
@@ -92,7 +98,7 @@ class Inventory:
         else:
             print(f"Ingredient '{name}' not found")
     
-    def update_from_receipt(self, name, quantity, total_price):
+    def update_from_receipt(self, name, quantity, total_price, receipt_image_path=None):
         """Update ingredient from a new receipt/purchase"""
         employee_name = self._require_login()
         
@@ -104,10 +110,14 @@ class Inventory:
             # Recalculate average price per unit
             self.ingredients[name]['price_per_unit'] = self.ingredients[name]['total_price'] / self.ingredients[name]['quantity']
             
+            details = f"{name}: +{quantity} {self.ingredients[name]['unit']} for ${total_price:.2f} (total now: {self.ingredients[name]['quantity']})"
+            if receipt_image_path:
+                details += f" | Receipt: {receipt_image_path}"
+            
             self.log_transaction(
                 action="RECEIPT_UPDATE",
                 employee=employee_name,
-                details=f"{name}: +{quantity} {self.ingredients[name]['unit']} for ${total_price:.2f} (total now: {self.ingredients[name]['quantity']})"
+                details=details
             )
             print(f"Updated {name} from receipt: +{quantity} {self.ingredients[name]['unit']} for ${total_price:.2f}")
         else:
@@ -152,6 +162,25 @@ class Inventory:
         for name, details in self.ingredients.items():
             print(f"{name:<20} {details['quantity']:<10.1f} {details['unit']:<10} ${details['total_price']:<11.2f} ${details['price_per_unit']:<9.2f}")
         print()
+    
+    def generate_inventory_report(self):
+        """Generate inventory report data"""
+        report = []
+        total_value = 0
+        
+        for name, details in sorted(self.ingredients.items()):
+            item_value = details['total_price']
+            total_value += item_value
+            
+            report.append({
+                'ingredient': name,
+                'quantity': details['quantity'],
+                'unit': details['unit'],
+                'price_per_unit': details['price_per_unit'],
+                'total_price': item_value
+            })
+        
+        return report, total_value
 
 
 class Product:
@@ -198,7 +227,210 @@ class Product:
             return None      
 
 
+class DailySales:
+    """Track daily sales and cash register"""
+    def __init__(self):
+        self.sales_file = "daily_sales.json"
+        self.load_sales()
+    
+    def load_sales(self):
+        """Load sales data from file"""
+        if os.path.exists(self.sales_file):
+            with open(self.sales_file, 'r') as f:
+                self.data = json.load(f)
+        else:
+            self.data = {}
+    
+    def save_sales(self):
+        """Save sales data to file"""
+        with open(self.sales_file, 'w') as f:
+            json.dump(self.data, f, indent=2)
+    
+    def get_today_key(self):
+        """Get today's date as key"""
+        return datetime.date.today().strftime("%Y-%m-%d")
+    
+    def initialize_day(self):
+        """Initialize today's sales data"""
+        today = self.get_today_key()
+        if today not in self.data:
+            self.data[today] = {
+                'total_sales': 0.0,
+                'total_cash': 0.0,
+                'total_card': 0.0,
+                'transaction_count': 0,
+                'transactions': []
+            }
+            self.save_sales()
+    
+    def record_sale(self, amount, payment_type, employee, items):
+        """Record a sale transaction"""
+        self.initialize_day()
+        today = self.get_today_key()
+        
+        self.data[today]['total_sales'] += amount
+        self.data[today]['transaction_count'] += 1
+        
+        if payment_type == 'cash':
+            self.data[today]['total_cash'] += amount
+        elif payment_type == 'card':
+            self.data[today]['total_card'] += amount
+        
+        # Record transaction details
+        transaction = {
+            'time': datetime.datetime.now().strftime("%H:%M:%S"),
+            'amount': amount,
+            'payment_type': payment_type,
+            'employee': employee,
+            'items': items
+        }
+        self.data[today]['transactions'].append(transaction)
+        
+        self.save_sales()
+    
+    def get_today_totals(self):
+        """Get today's sales totals"""
+        self.initialize_day()
+        today = self.get_today_key()
+        return self.data[today]
+    
+    def get_end_of_day_report(self):
+        """Generate end of day report"""
+        today = self.get_today_key()
+        if today in self.data:
+            return self.data[today]
+        return None
+
+
 class EmployeeAuth:
+    def __init__(self):
+        self.employees = {}
+        self.current_user = None
+        
+    def load_employees(self, filename="employees.csv"):
+        """Load employee data from CSV"""
+        with open(filename, 'r') as file:
+            reader = csv.DictReader(file)
+            for row in reader:
+                emp_id = row['Employee_ID']
+                self.employees[emp_id] = {
+                    'name': row['Name'],
+                    'pin_hash': row['PIN_Hash'],
+                    'role': row['Role']
+                }
+        print(f"Loaded {len(self.employees)} employees")
+    
+    def hash_pin(self, pin):
+        """Hash a PIN for secure storage/comparison"""
+        return hashlib.sha256(pin.encode()).hexdigest()
+    
+    def login(self, pin):
+        """Authenticate employee with 4-digit PIN"""
+        if len(pin) != 4 or not pin.isdigit():
+            print("❌ Invalid PIN format. Must be 4 digits.")
+            return False
+        
+        pin_hash = self.hash_pin(pin)
+        
+        # Search for matching PIN
+        for emp_id, details in self.employees.items():
+            if details['pin_hash'] == pin_hash:
+                self.current_user = {
+                    'id': emp_id,
+                    'name': details['name'],
+                    'role': details['role']
+                }
+                print(f"✓ Welcome, {details['name']} ({details['role']})")
+                self.log_login()
+                return True
+        
+        print("❌ Invalid PIN. Access denied.")
+        return False
+    
+    def logout(self):
+        """Log out current user"""
+        if self.current_user:
+            print(f"Logged out: {self.current_user['name']}")
+            self.log_logout()
+            self.current_user = None
+        else:
+            print("No user currently logged in")
+    
+    def is_logged_in(self):
+        """Check if someone is logged in"""
+        return self.current_user is not None
+    
+    def get_current_user_name(self):
+        """Get name of current logged-in user"""
+        if self.current_user:
+            return self.current_user['name']
+        return "Unknown"
+    
+    def get_current_user_role(self):
+        """Get role of current logged-in user"""
+        if self.current_user:
+            return self.current_user['role']
+        return None
+    
+    def is_admin(self):
+        """Check if current user is admin"""
+        return self.current_user and self.current_user['role'] == 'Admin'
+    
+    def is_manager_or_admin(self):
+        """Check if current user is manager or admin"""
+        return self.current_user and self.current_user['role'] in ['Admin', 'Manager']
+    
+    def log_login(self):
+        """Log employee login"""
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with open('employee_log.txt', 'a') as log:
+            log.write(f"{timestamp} | LOGIN  | {self.current_user['name']} ({self.current_user['id']})\n")
+    
+    def log_logout(self):
+        """Log employee logout"""
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with open('employee_log.txt', 'a') as log:
+            log.write(f"{timestamp} | LOGOUT | {self.current_user['name']} ({self.current_user['id']})\n")
+    
+    def add_employee(self, name, pin, role="Cashier"):
+        """Add new employee (admin only)"""
+        if not self.is_admin():
+            print("❌ Only admins can add employees")
+            return False
+        
+        if len(pin) != 4 or not pin.isdigit():
+            print("❌ PIN must be 4 digits")
+            return False
+        
+        # Generate new employee ID
+        emp_ids = [int(emp_id) for emp_id in self.employees.keys()]
+        new_id = f"{max(emp_ids) + 1:04d}"
+        
+        self.employees[new_id] = {
+            'name': name,
+            'pin_hash': self.hash_pin(pin),
+            'role': role
+        }
+        
+        # Save to CSV
+        self.save_employees()
+        print(f"✓ Added employee: {name} (ID: {new_id}, PIN: {pin})")
+        return True
+    
+    def save_employees(self, filename="employees.csv"):
+        """Save employees back to CSV"""
+        with open(filename, 'w', newline='') as file:
+            fieldnames = ['Employee_ID', 'Name', 'PIN_Hash', 'Role']
+            writer = csv.DictWriter(file, fieldnames=fieldnames)
+            
+            writer.writeheader()
+            for emp_id, details in self.employees.items():
+                writer.writerow({
+                    'Employee_ID': emp_id,
+                    'Name': details['name'],
+                    'PIN_Hash': details['pin_hash'],
+                    'Role': details['role']
+                })
     def __init__(self):
         self.employees = {}
         self.current_user = None
